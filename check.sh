@@ -301,11 +301,18 @@ probe_fit_log() {                                    # 規則 R9
     log="$(journalctl -u ollama --no-pager 2>/dev/null \
            | grep -E 'common_params_fit_impl|offloaded [0-9]+/[0-9]+ layers' | tail -60)"
     [ -n "$log" ] || return
-    # 詳細資料只留有判讀價值的行，避免把十幾行迭代過程塞進報告
+    # 詳細資料只留有判讀價值的行，避免把十幾行迭代過程塞進報告。
+    #
+    # 同時抽掉 journalctl 預設格式裡的「主機名 ollama[PID]:」——
+    # 主機名（例如 DESKTOP-XXXXXXX）是可識別資訊，而這段 log 會原樣
+    # 進入報告的詳細資料區與「複製診斷資訊」文字，也就是使用者被鼓勵
+    # 貼給 AI 的那份。時間戳與訊息本體全部保留，R9 的判讀不受影響。
     R9_RAW="$(printf '%s\n' "$log" \
               | grep -E 'projected to use|will leave|offloaded [0-9]+/[0-9]+ layers|layers, .* MiB used' \
+              | sed -E 's/ [^ ]+ ollama\[[0-9]+\]:/ ollama:/' \
               | tail -6)"
-    [ -n "$R9_RAW" ] || R9_RAW="$(printf '%s\n' "$log" | tail -6)"
+    [ -n "$R9_RAW" ] || R9_RAW="$(printf '%s\n' "$log" \
+              | sed -E 's/ [^ ]+ ollama\[[0-9]+\]:/ ollama:/' | tail -6)"
     local off proj
     off="$(printf '%s\n' "$log" | grep -oE 'offloaded [0-9]+/[0-9]+ layers' | tail -1)"
     if [ -n "$off" ]; then
