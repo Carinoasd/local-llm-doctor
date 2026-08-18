@@ -254,11 +254,18 @@ R9_RAW=""
 probe_fit_log() {                                    # 規則 R9
     backend_has_cap logs || return
     have journalctl || return
+    # 視窗要夠大：溢位時 llama.cpp 會多印十幾行 fitting 迭代，
+    # 把最關鍵的 "projected to use ... vs ..." 擠出視窗外。
+    # 用 tail -6 會導致「最需要缺口數字的溢位情境」反而抓不到，實測踩過。
     local log
     log="$(journalctl -u ollama --no-pager 2>/dev/null \
-           | grep -E 'common_params_fit_impl|offloaded [0-9]+/[0-9]+ layers' | tail -6)"
+           | grep -E 'common_params_fit_impl|offloaded [0-9]+/[0-9]+ layers' | tail -60)"
     [ -n "$log" ] || return
-    R9_RAW="$log"
+    # 詳細資料只留有判讀價值的行，避免把十幾行迭代過程塞進報告
+    R9_RAW="$(printf '%s\n' "$log" \
+              | grep -E 'projected to use|will leave|offloaded [0-9]+/[0-9]+ layers|layers, .* MiB used' \
+              | tail -6)"
+    [ -n "$R9_RAW" ] || R9_RAW="$(printf '%s\n' "$log" | tail -6)"
     local off proj
     off="$(printf '%s\n' "$log" | grep -oE 'offloaded [0-9]+/[0-9]+ layers' | tail -1)"
     if [ -n "$off" ]; then
