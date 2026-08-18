@@ -51,13 +51,18 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # 規則結果表。索引一致的平行陣列，順序即報告顯示順序。
 RULE_ID=(); RULE_TITLE=(); RULE_STATUS=()
-RULE_SYMPTOM=(); RULE_CONSEQ=(); RULE_FIX=(); RULE_DETAIL=()
+RULE_SYMPTOM=(); RULE_CONSEQ=(); RULE_FIX=(); RULE_DETAIL=(); RULE_ACTION=()
 
-# add_rule <id> <標題> <狀態> <症狀> <後果> <修法> <詳細資料>
+# add_rule <id> <標題> <狀態> <症狀> <後果> <修法> <詳細資料> [一句話行動]
 # 狀態：PASS / WARN / FAIL / SKIP / INFO
+#
+# 第 8 個參數是給結論層用的「一句話行動」，可省略。
+# 不能直接拿 <修法> 的第一行來當它 —— 修法常常以「兩條路，先試第一條：」
+# 這種標題開頭，抓第一行會抓到標題而不是動作。
 add_rule() {
     RULE_ID+=("$1"); RULE_TITLE+=("$2"); RULE_STATUS+=("$3")
     RULE_SYMPTOM+=("$4"); RULE_CONSEQ+=("$5"); RULE_FIX+=("$6"); RULE_DETAIL+=("$7")
+    RULE_ACTION+=("${8:-}")
 }
 
 # ---------------------------------------------------------------------------
@@ -250,7 +255,17 @@ probe_model_file_size() {                            # 規則 R3
 R9_AVAILABLE=0
 R9_LAYERS_ON=""; R9_LAYERS_TOTAL=""
 R9_PROJECTED=""; R9_FREE=""
-R9_RAW=""
+R9_RAW=""; R9_AGE=""
+
+# 把秒數講成人話。空載時 R9 顯示的是歷史紀錄，必須讓使用者一眼知道「多久以前」。
+humanize_age() {
+    local s="$1"
+    if   [ "$s" -lt 90 ];    then echo "不到 1 分鐘前"
+    elif [ "$s" -lt 5400 ];  then echo "約 $(( (s + 30) / 60 )) 分鐘前"
+    elif [ "$s" -lt 172800 ];then echo "約 $(( (s + 1800) / 3600 )) 小時前"
+    else                          echo "約 $(( (s + 43200) / 86400 )) 天前"
+    fi
+}
 probe_fit_log() {                                    # 規則 R9
     backend_has_cap logs || return
     have journalctl || return
@@ -272,6 +287,14 @@ probe_fit_log() {                                    # 規則 R9
         R9_LAYERS_ON="$(sed -E 's/offloaded ([0-9]+)\/([0-9]+).*/\1/' <<<"$off")"
         R9_LAYERS_TOTAL="$(sed -E 's/offloaded ([0-9]+)\/([0-9]+).*/\2/' <<<"$off")"
         R9_AVAILABLE=1
+    fi
+    # 取最後一次載入事件的時間戳，用來標示「這是多久以前的紀錄」
+    local ts now
+    ts="$(journalctl -u ollama --no-pager -o short-unix 2>/dev/null \
+          | grep -E 'offloaded [0-9]+/[0-9]+ layers' | tail -1 | awk '{print $1}' | cut -d. -f1)"
+    if [ -n "$ts" ]; then
+        now="$(date +%s)"
+        [ "$now" -ge "$ts" ] && R9_AGE="$(humanize_age $(( now - ts )))"
     fi
     proj="$(printf '%s\n' "$log" | grep -oE 'projected to use [0-9]+ MiB of device memory vs\. [0-9]+ MiB' | tail -1)"
     if [ -n "$proj" ]; then
@@ -381,14 +404,16 @@ sudo apt-get install zstd
 curl -fsSL https://ollama.com/install.sh | sh" \
             "${dir} 存在且為空
 zstd: 未安裝
-判定依據：安裝腳本會先建目錄再下載解壓，缺 zstd 時在解壓階段中止"
+判定依據：安裝腳本會先建目錄再下載解壓，缺 zstd 時在解壓階段中止" \
+            "先補裝 zstd 這個小工具，再重新安裝一次 Ollama"
     elif [ "$dir_empty" -eq 1 ]; then
         add_rule "R8" "Ollama 安裝中途失敗" "FAIL" \
             "你裝過 Ollama，但沒裝完。" \
             "安裝在中途停掉了，留下一個空資料夾。Ollama 目前不能用。" \
             "重跑一次安裝指令，這次注意看有沒有紅色的錯誤訊息：
 curl -fsSL https://ollama.com/install.sh | sh" \
-            "${dir} 存在且為空；zstd 已安裝（所以不是 zstd 造成的）"
+            "${dir} 存在且為空；zstd 已安裝（所以不是 zstd 造成的）" \
+            "重跑一次官方安裝指令"
     else
         add_rule "R8" "Ollama 是否安裝" "FAIL" \
             "找不到 Ollama。" \
@@ -398,7 +423,8 @@ sudo apt-get install zstd
 curl -fsSL https://ollama.com/install.sh | sh" \
             "command -v ollama: 找不到
 ${dir}: $( [ -d "$dir" ] && echo '存在（非空）' || echo '不存在' )
-zstd: $(have zstd && echo '已安裝' || echo '未安裝')"
+zstd: $(have zstd && echo '已安裝' || echo '未安裝')" \
+            "先安裝 Ollama"
     fi
 }
 
@@ -414,7 +440,8 @@ rule_r6() {                                          # R6 服務沒起來 / port
 ss -ltnp 'sport = :11434'" \
             "port 11434 有回應但內容不是 Ollama。
 回應開頭：$(printf '%s' "$SVC_WSL_BODY" | head -c 120)
-${who}"
+${who}" \
+            "找出佔用 11434 這個門牌的程式並關掉它"
         return
     fi
     if [ "$SVC_WSL_UP" -eq 0 ]; then
@@ -424,7 +451,8 @@ ${who}"
             "啟動服務：
 sudo systemctl start ollama" \
             "curl http://localhost:11434/ 連線被拒（無回應）
-systemctl is-active ollama: $(systemctl is-active ollama 2>/dev/null || echo '查詢失敗')"
+systemctl is-active ollama: $(systemctl is-active ollama 2>/dev/null || echo '查詢失敗')" \
+            "執行 sudo systemctl start ollama 把服務打開"
         return
     fi
     if [ "$SVC_WIN_UP" -eq 1 ]; then
@@ -433,7 +461,8 @@ systemctl is-active ollama: $(systemctl is-active ollama 2>/dev/null || echo '�
             "兩套各自存放模型，互相看不到對方的。最常見的症狀是「我明明下載過那個模型，怎麼不見了」——其實是下載到另一套去了。" \
             "決定只留一套。建議留 WSL 這套（這個工具檢查的就是它），然後在 Windows 的工作管理員裡結束 Ollama，並取消它的開機自動啟動。" \
             "WSL 側 11434：Ollama is running
-Windows 側 11434：Ollama is running"
+Windows 側 11434：Ollama is running" \
+            "在 Windows 那一側關掉 Ollama，只留 WSL 這一套"
         return
     fi
     add_rule "R6" "Ollama 服務" "PASS" \
@@ -482,7 +511,7 @@ R9 佐證：offloaded ${R9_LAYERS_ON}/${R9_LAYERS_TOTAL} layers to GPU"
 
     # R2：完全跑在 CPU
     if [ "$M_CPU_PCT" -ge 100 ]; then
-        local cause fix
+        local cause fix r2_action=""
         if [ "$GPU_PRESENT" -eq 1 ]; then
             cause="顯示卡本身是好的，是 Ollama 沒有認到它。"
             fix="先重啟服務試試：
@@ -493,12 +522,14 @@ curl -fsSL https://ollama.com/install.sh | sh"
         else
             cause="而且這台機器上偵測不到可用的顯示卡，請先看「WSL 顯示卡驅動」那一項。"
             fix="先解決顯示卡驅動的問題，Ollama 才可能用得到它。"
+            r2_action="先修好顯示卡驅動（見下面那一項）"
         fi
         add_rule "R2" "完全跑在 CPU 上" "FAIL" \
             "模型完全用 CPU 在跑，顯示卡沒有出力。" \
             "這是最嚴重的一種慢。CPU 讀取資料的速度大約只有顯示卡的十分之一，實際體感通常是慢上好幾倍到十幾倍。${cause}" \
             "$fix" \
-            "$detail"
+            "$detail" \
+            "$r2_action"
         return
     fi
 
@@ -514,7 +545,8 @@ curl -fsSL https://ollama.com/install.sh | sh"
             "模型有一小部分（約 ${M_CPU_PCT}%）放不進顯示卡，被擠到主記憶體用 CPU 跑。" \
             "會變慢，但還不算嚴重。參考本機實測：約三成被擠出去時會慢 3.3 倍，你目前遠低於這個程度。" \
             "先看下面「其他程式佔用顯示卡記憶體」那一項——通常關掉一兩個程式就能全部放回顯示卡，不需要換模型。" \
-            "$detail"
+            "$detail" \
+            "先關掉一兩個佔用顯示卡記憶體的程式"
     elif [ "$M_CPU_PCT" -le 50 ]; then
         add_rule "R1" "模型放不進顯示卡" "FAIL" \
             "模型有大約 ${M_CPU_PCT}% 放不進顯示卡，被擠到主記憶體用 CPU 跑。" \
@@ -522,14 +554,16 @@ curl -fsSL https://ollama.com/install.sh | sh"
             "兩條路，先試第一條：
 1. 看下面「其他程式佔用顯示卡記憶體」，關掉佔用的程式
 2. 換小一號的模型，例如 7B/8B 換成更低的量化版本" \
-            "$detail"
+            "$detail" \
+            "先關掉佔用顯示卡記憶體的程式，不夠再換小一號的模型"
     else
         add_rule "R1" "模型放不進顯示卡" "FAIL" \
             "模型有大約 ${M_CPU_PCT}% 放不進顯示卡，大部分都在用 CPU 跑。" \
             "非常慢。本機實測：約八成被擠出去時，速度掉到原本的九分之一（慢 8.7 倍）——原本三秒的回答要等半分鐘。" \
             "這個程度光靠關程式救不回來，換一個小一號的模型比較實際：
 ollama run llama3.2:3b" \
-            "$detail"
+            "$detail" \
+            "換一個小一號的模型"
     fi
 }
 
@@ -569,13 +603,15 @@ rule_r3() {                                          # R3 context 開太大
 
 想永久生效的話，改服務設定（需要重啟服務）：
 sudo mkdir -p /etc/systemd/system/ollama.service.d && printf '[Service]\nEnvironment=\"OLLAMA_CONTEXT_LENGTH=8192\"\n' | sudo tee /etc/systemd/system/ollama.service.d/ctx.conf && sudo systemctl daemon-reload && sudo systemctl restart ollama" \
-                "$detail"
+                "$detail" \
+                "把對話長度調回 8192"
         else
             add_rule "R3" "對話長度設定" "WARN" \
                 "模型本身就比顯示卡裝得下的還大，跟對話長度關係不大。" \
                 "對話記憶只佔載入大小的 ${kv_share}%，主因是模型本身。調小對話長度幫助有限。" \
                 "換一個小一號的模型會比較有效，作法見上面「模型放不進顯示卡」那一項。" \
-                "$detail"
+                "$detail" \
+                "換一個小一號的模型"
         fi
     elif [ "$ctx" -gt 8192 ]; then
         add_rule "R3" "對話長度設定" "WARN" \
@@ -583,7 +619,8 @@ sudo mkdir -p /etc/systemd/system/ollama.service.d && printf '[Service]\nEnviron
             "本機實測：對話長度從 4096 開到 65536，即使完全沒有溢位，速度仍然掉了 16%。對話記憶越大，每產生一個字要掃過的資料就越多。如果你不需要這麼長的記憶，調小會比較快。" \
             "想換速度的話，調回 8192：
 /set parameter num_ctx 8192" \
-            "$detail"
+            "$detail" \
+            "把對話長度調回 8192"
     else
         # 若 R1 已判定溢位，這裡不能說「整體放得進顯示卡」——會與 R1 互相矛盾。
         # 這種情形代表擁擠的原因不是對話長度（例如被 num_gpu 之類的設定限制住）。
@@ -614,10 +651,14 @@ ${fallback}"
         return
     fi
     # log 是歷史紀錄，模型卸載後仍留著。沒有模型在跑時，絕不可把它當成現況呈現。
+    #
+    # 這裡刻意「保留並標註時態」而不是直接 SKIP：Ollama 預設閒置 5 分鐘就卸載模型，
+    # 而使用者的典型流程是「覺得慢 → 去找工具 → 跑起來」，很容易超過 5 分鐘。
+    # 那時候這份歷史紀錄是唯一還留著的證據，SKIP 會讓最需要診斷的情境變成一片空白。
     local when="引擎的紀錄顯示：" tense="這就是上面那項判定的來源。"
     if [ "$MODEL_LOADED" -eq 0 ]; then
-        when="上一次載入模型時的紀錄（目前沒有模型在跑）："
-        tense="這是歷史紀錄，不代表現在的狀態。"
+        when="以下是最近一次模型載入的紀錄（${R9_AGE:-時間不明}），不是目前的狀態——現在沒有模型在跑："
+        tense="這是${R9_AGE:-稍早}的紀錄，不代表現在。如果你剛才覺得慢，這筆紀錄很可能就是當時的情況。"
     fi
 
     local status="PASS" symptom conseq
@@ -695,7 +736,8 @@ $(printf '%s' "$PROC_RANK" | awk -F'\t' 'NF{printf "  %-24s %8s MB  %s\n", $1, $
                 "這就是上面「模型放不進顯示卡」的原因。${hint}" \
                 "關掉不用的程式；瀏覽器可以只關硬體加速（設定 → 系統 → 關閉「使用硬體加速」），不必整個關掉。
 ※ 清單裡標示「不建議關閉」的請不要動——那是 WSL 本身或 Windows 系統元件。" \
-                "$detail"
+                "$detail" \
+                "${top_name:+關掉「${top_name}」試試}"
             return
         fi
     fi
@@ -735,7 +777,8 @@ ldconfig libcuda：${ld:-未找到}"
 sudo apt-get purge -y '^nvidia-.*' '^libnvidia-.*' && sudo apt-get autoremove -y && hash -r
 
 然後在 Windows 的 PowerShell 執行 wsl --shutdown，再重開 WSL。" \
-            "$detail"
+            "$detail" \
+            "移除 WSL 裡誤裝的 nvidia 驅動套件"
         return
     fi
     if [ "$dxg" -eq 0 ]; then
@@ -746,7 +789,8 @@ sudo apt-get purge -y '^nvidia-.*' '^libnvidia-.*' && sudo apt-get autoremove -y
 wsl --update
 
 然後 wsl --shutdown 再重開。" \
-            "$detail"
+            "$detail" \
+            "在 Windows 的 PowerShell 執行 wsl --update"
         return
     fi
     if [ "$GPU_PRESENT" -eq 0 ]; then
@@ -791,16 +835,98 @@ rule_r5
 rule_r4
 
 # ---------------------------------------------------------------------------
+# 結論層：報告最上面的 2–3 行人話總結
+#
+# 使用者第一眼只會看這幾行。它必須回答三件事：
+#   1. 有沒有問題　2. 最重要的是哪一個　3. 先做什麼
+# 終端機與 report.html 共用同一份文字，避免兩邊講不一樣的話。
+# ---------------------------------------------------------------------------
+
+VERDICT=()
+
+build_verdict() {
+    # 嚴重度排序：先修不能用的，再修慢的。這個順序決定「最需要處理的是哪一個」。
+    local pri=(R8 R6 R2 R4 R1 R3 R5 R0 R9)
+    local want top_i=-1 top_kind="" p i
+
+    for want in FAIL WARN; do
+        for p in "${pri[@]}"; do
+            for i in "${!RULE_ID[@]}"; do
+                [ "${RULE_ID[$i]}" = "$p" ] || continue
+                if [ "${RULE_STATUS[$i]}" = "$want" ]; then
+                    top_i=$i; top_kind="$want"; break 3
+                fi
+            done
+        done
+    done
+
+    local act
+    if [ "$top_kind" = "FAIL" ] || [ "$top_kind" = "WARN" ]; then
+        act="${RULE_ACTION[$top_i]}"
+        if [ -n "$act" ]; then
+            act="先做這件事：${act}。完整步驟在下面「${RULE_TITLE[$top_i]}」那一段。"
+        else
+            act="做法看下面「${RULE_TITLE[$top_i]}」那一段，裡面有可以直接複製的指令。"
+        fi
+    fi
+
+    if [ "$top_kind" = "FAIL" ]; then
+        VERDICT+=("檢查完畢，發現 ${n_fail} 個需要處理的問題。最重要的是：${RULE_TITLE[$top_i]}。")
+        VERDICT+=("${RULE_SYMPTOM[$top_i]}")
+        VERDICT+=("$act")
+        return
+    fi
+
+    if [ "$top_kind" = "WARN" ]; then
+        VERDICT+=("檢查完畢，沒有嚴重問題，但有 ${n_warn} 項值得注意。最主要的是：${RULE_TITLE[$top_i]}。")
+        VERDICT+=("${RULE_SYMPTOM[$top_i]}")
+        VERDICT+=("$act")
+        return
+    fi
+
+    VERDICT+=("檢查完畢，沒有發現會拖慢速度的設定問題。")
+    if [ "$MODEL_LOADED" -eq 1 ] && [ "$M_CPU_PCT" -eq 0 ]; then
+        VERDICT+=("你的模型完整跑在顯示卡上，這是最理想的狀態。")
+        VERDICT+=("如果還是覺得慢，通常是模型本身偏大或機器規格的限制，而不是設定沒調好。")
+    elif [ "$MODEL_LOADED" -eq 0 ]; then
+        VERDICT+=("不過目前沒有模型在執行，所以看不到它實際跑在哪裡。")
+        VERDICT+=("在你覺得「怎麼這麼慢」的當下再跑一次這個檢查，結果會準確得多。")
+    else
+        VERDICT+=("環境設定看起來沒有問題。")
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # 終端機輸出（人話為主，技術值只在 report.html 的詳細資料區）
 # ---------------------------------------------------------------------------
 
 n_fail=0; n_warn=0; n_pass=0
 for i in "${!RULE_ID[@]}"; do
+    case "${RULE_STATUS[$i]}" in
+        PASS) n_pass=$((n_pass+1)) ;;
+        WARN) n_warn=$((n_warn+1)) ;;
+        FAIL) n_fail=$((n_fail+1)) ;;
+    esac
+done
+
+build_verdict
+
+# 結論層 —— 使用者第一眼看到的東西
+echo "${C_BOLD}══════════════════════════════════════════════════════${C_RESET}"
+for line in "${VERDICT[@]}"; do
+    printf '  %s\n' "$line"
+done
+echo "${C_BOLD}══════════════════════════════════════════════════════${C_RESET}"
+echo
+echo "${C_DIM}以下是每一項的細節：${C_RESET}"
+echo
+
+for i in "${!RULE_ID[@]}"; do
     st="${RULE_STATUS[$i]}"
     case "$st" in
-        PASS) col="$C_PASS"; label="正常" ; n_pass=$((n_pass+1)) ;;
-        WARN) col="$C_WARN"; label="注意" ; n_warn=$((n_warn+1)) ;;
-        FAIL) col="$C_FAIL"; label="問題" ; n_fail=$((n_fail+1)) ;;
+        PASS) col="$C_PASS"; label="正常" ;;
+        WARN) col="$C_WARN"; label="注意" ;;
+        FAIL) col="$C_FAIL"; label="問題" ;;
         SKIP) col="$C_DIM";  label="略過" ;;
         *)    col="$C_INFO"; label="資訊" ;;
     esac
@@ -928,6 +1054,14 @@ details{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
 summary{cursor:pointer;color:var(--muted);font-size:.88rem;user-select:none}
 details pre{margin-top:10px;background:var(--code);padding:12px;border-radius:8px;
   overflow-x:auto;color:var(--muted)}
+.verdict{border-radius:12px;padding:20px 24px;margin-bottom:24px;
+  border:1px solid var(--line)}
+.verdict.p{background:var(--pass-bg);border-color:var(--pass)}
+.verdict.w{background:var(--warn-bg);border-color:var(--warn)}
+.verdict.f{background:var(--fail-bg);border-color:var(--fail)}
+.verdict p{margin:0 0 8px}
+.verdict p:first-child{font-size:1.15rem;font-weight:700}
+.verdict p:last-child{margin-bottom:0}
 .copybar{background:var(--card);border:1px solid var(--line);border-radius:12px;
   padding:20px;margin-bottom:24px}
 button{font:inherit;font-weight:600;padding:10px 20px;border-radius:8px;
@@ -948,6 +1082,14 @@ HTMLHEAD
         printf '<span class="chip f">%d 個問題</span>' "$n_fail"
         printf '<span class="chip w">%d 個注意</span>' "$n_warn"
         printf '<span class="chip p">%d 個正常</span>' "$n_pass"
+        printf '</div>\n'
+
+        # 結論層：與終端機共用同一份 VERDICT 文字
+        vk="p"; [ "$n_warn" -gt 0 ] && vk="w"; [ "$n_fail" -gt 0 ] && vk="f"
+        printf '<div class="verdict %s">\n' "$vk"
+        for line in "${VERDICT[@]}"; do
+            printf '<p>%s</p>\n' "$(esc "$line")"
+        done
         printf '</div>\n'
 
         cat <<'COPYBAR'
