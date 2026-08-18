@@ -413,7 +413,7 @@ Driver: ${GPU_DRIVER}"
         add_rule "R0" "顯示卡偵測" "SKIP" \
             "未偵測到支援的顯示卡。" \
             "這個版本只支援 NVIDIA 顯示卡，所以跟顯示卡有關的檢查（模型放不放得下、有沒有別的程式佔用顯存）會全部跳過。其餘檢查照常進行。" \
-            "如果你確實有 NVIDIA 顯示卡，往下看「WSL 顯示卡驅動」那一項。" \
+            "多數情況下不需要做任何事。如果你確定這台電腦裝了 NVIDIA 顯示卡，往下看「WSL 顯示卡支援狀態」那一項列出的三種可能。" \
             "nvidia-smi probe: ${GPU_PROBE_ERR:-無法取得輸出}"
     fi
 }
@@ -543,25 +543,30 @@ R9 佐證：offloaded ${R9_LAYERS_ON}/${R9_LAYERS_TOTAL} layers to GPU"
 
     # R2：完全跑在 CPU
     if [ "$M_CPU_PCT" -ge 100 ]; then
-        local cause fix r2_action=""
-        if [ "$GPU_PRESENT" -eq 1 ]; then
-            cause="顯示卡本身是好的，是 Ollama 沒有認到它。"
-            fix="先重啟服務試試：
-sudo systemctl restart ollama
-
-還是不行就更新 Ollama：
-curl -fsSL https://ollama.com/install.sh | sh"
-        else
-            cause="而且這台機器上偵測不到可用的顯示卡，請先看「WSL 顯示卡驅動」那一項。"
-            fix="先解決顯示卡驅動的問題，Ollama 才可能用得到它。"
-            r2_action="先修好顯示卡驅動（見下面那一項）"
+        # 偵測不到 NVIDIA 卡時，「跑在 CPU 上」是預期結果而不是故障。
+        # 這裡原本一律判 FAIL 並要求「先解決顯示卡驅動的問題」，對一台
+        # 本來就沒有 N 卡的機器來說是跟 R4 同一類的自信錯誤建議，
+        # 所以在無 GPU 的前提下降為 INFO 並改寫文案。
+        if [ "$GPU_PRESENT" -eq 0 ]; then
+            add_rule "R2" "模型跑在 CPU 上" "INFO" \
+                "模型完全用 CPU 在跑。這台機器上偵測不到 NVIDIA 顯示卡，所以這是預期的結果，不是故障。" \
+                "純用 CPU 跑會明顯比有顯示卡慢，這是硬體的差距，不是設定沒調好。如果你確定這台有 NVIDIA 顯示卡，往下看「WSL 顯示卡支援狀態」那一項的三種可能。" \
+                "沒有 NVIDIA 顯示卡的話，能做的是換更小的模型讓它跑得動一些：
+ollama run llama3.2:1b" \
+                "$detail" \
+                "換一個更小的模型"
+            return
         fi
         add_rule "R2" "完全跑在 CPU 上" "FAIL" \
             "模型完全用 CPU 在跑，顯示卡沒有出力。" \
-            "這是最嚴重的一種慢。CPU 讀取資料的速度大約只有顯示卡的十分之一，實際體感通常是慢上好幾倍到十幾倍。${cause}" \
-            "$fix" \
+            "這是最嚴重的一種慢。CPU 讀取資料的速度大約只有顯示卡的十分之一，實際體感通常是慢上好幾倍到十幾倍。顯示卡本身是好的，是 Ollama 沒有認到它。" \
+            "先重啟服務試試：
+sudo systemctl restart ollama
+
+還是不行就更新 Ollama：
+curl -fsSL https://ollama.com/install.sh | sh" \
             "$detail" \
-            "$r2_action"
+            "執行 sudo systemctl restart ollama"
         return
     fi
 
@@ -827,10 +832,26 @@ wsl --update
         return
     fi
     if [ "$GPU_PRESENT" -eq 0 ]; then
-        add_rule "R4" "WSL 顯示卡驅動" "WARN" \
-            "WSL 的顯示卡通道是通的，但問不到顯示卡的資料。" \
-            "可能是 Windows 那邊的驅動太舊或沒裝好。" \
-            "到 Windows 更新 NVIDIA 驅動（NVIDIA App 或官網下載頁），更新後在 PowerShell 執行 wsl --shutdown 再重開。" \
+        # 這一段原本判 WARN 並直接說「Windows 驅動太舊或沒裝好，去更新驅動」。
+        # 第一批外部實測（n=2）打臉了這個判斷：一台 Intel 內顯 ＋ NVIDIA 獨顯的
+        # 雙顯卡筆電（Surface Book），/dev/dxg 存在但 WSL 內問不到 nvidia-smi，
+        # 工具卻自信地叫使用者去更新驅動 —— 而使用者的機器根本沒問題。
+        #
+        # 根本錯誤：/dev/dxg 在任何啟用 GPU 直通的 WSL2 上都存在，Intel 與 AMD
+        # 也算。它證明的是「WSL 的顯示卡通道通了」，不是「這台應該要有 NVIDIA」。
+        # 拿它當「NVIDIA 應該存在」的證據，就會對沒有 N 卡的機器產生自信的錯誤建議
+        # —— 跟 vmwp 那條（叫使用者關掉自己的模型）是同一類問題。
+        #
+        # 現在改成 INFO 並列出三種可能，讓使用者自己對號入座。
+        # 「這台電腦沒有 NVIDIA 顯示卡」不是一個需要警告的狀態。
+        add_rule "R4" "WSL 顯示卡支援狀態" "INFO" \
+            "WSL 的顯示卡通道是通的，但在裡面問不到 NVIDIA 顯示卡。" \
+            "這有三種可能，先看看哪一種符合你的情況：
+（一）這台電腦本來就沒有 NVIDIA 顯示卡，只有內建顯示晶片或 AMD 的卡——那這是正常的，不用處理，這個工具目前只支援 NVIDIA。
+（二）這是一台雙顯卡筆電（Surface Book、多數電競筆電都是）——WSL 常常問不到獨立顯示卡，這是已知限制，不代表你的機器壞了。
+（三）這是桌機，而且你確定裝了 NVIDIA 顯示卡——那才有可能是 Windows 那邊的驅動需要更新。" \
+            "只有第（三）種情況才需要動手：到 Windows 更新 NVIDIA 驅動（NVIDIA App 或官網下載頁），更新後在 PowerShell 執行 wsl --shutdown 再重開。
+前兩種情況不需要做任何事。" \
             "$detail"
         return
     fi
@@ -886,6 +907,12 @@ build_verdict() {
         for p in "${pri[@]}"; do
             for i in "${!RULE_ID[@]}"; do
                 [ "${RULE_ID[$i]}" = "$p" ] || continue
+                # 偵測不到 NVIDIA 卡時，R4 講的是「這台可能本來就沒有 N 卡」，
+                # 那不是問題，更不該被推上結論層當成「最主要的問題」。
+                # 外部實測踩過：Surface Book 上 R0 已 SKIP，結論層卻把 R4 的
+                # 驅動警告當頭條，等於叫一台沒壞的機器去修驅動。
+                # R4 現在是 INFO 本來就選不到，這裡再擋一層避免日後改回 WARN 時復發。
+                [ "$p" = "R4" ] && [ "$GPU_PRESENT" -eq 0 ] && continue
                 if [ "${RULE_STATUS[$i]}" = "$want" ]; then
                     top_i=$i; top_kind="$want"; break 3
                 fi
@@ -914,6 +941,16 @@ build_verdict() {
         VERDICT+=("檢查完畢，沒有嚴重問題，但有 ${n_warn} 項值得注意。最主要的是：${RULE_TITLE[$top_i]}。")
         VERDICT+=("${RULE_SYMPTOM[$top_i]}")
         VERDICT+=("$act")
+        return
+    fi
+
+    # 沒有 NVIDIA 卡而模型跑在 CPU 上：技術上「沒有設定問題」是對的，
+    # 但使用者此刻正在經歷慢，只講「沒問題」等於答非所問。
+    # 要說出他真正想知道的那件事：慢的原因是硬體，不是他設定錯了。
+    if [ "$GPU_PRESENT" -eq 0 ] && [ "$MODEL_LOADED" -eq 1 ] && [ "$M_CPU_PCT" -ge 100 ]; then
+        VERDICT+=("檢查完畢，設定沒有問題——但這台機器上偵測不到 NVIDIA 顯示卡，所以模型是用 CPU 在跑。")
+        VERDICT+=("這就是它慢的原因。純用 CPU 跑比有顯示卡慢很多，那是硬體的差距，不是你哪裡設定錯了。")
+        VERDICT+=("能做的是換更小的模型讓它跑得順一些，例如 llama3.2:1b。詳細說明在下面「模型跑在 CPU 上」那一段。")
         return
     fi
 
