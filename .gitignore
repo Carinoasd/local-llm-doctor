@@ -1,2 +1,15 @@
+# 每次執行都會覆寫的產出物，含本機資料，永不提交
+report.html
+report-*.html
+!report-sample.html
+
+# 開發期的驗證紀錄，含大量本機原始輸出，留在本地
+verify-report.md
+verify-checklist.md
+
+# 對外投稿的草稿，不進版控
+issue-draft.md
+
+# 暫存
 scratch/
 *.tmp
