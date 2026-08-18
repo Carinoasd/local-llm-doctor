@@ -82,7 +82,6 @@
   敢開終端機的門檻遠低於懂 VRAM／量化／KV cache。受眾定義沒有變質，只是範圍縮到 Ollama 使用者。
 - **所有文案以此為準。** 報告裡不出現「本工具支援多種引擎」這類暗示，
   但也不寫死成「Ollama 專用工具」——見下面的後端抽象。
-- **資料夾維持獨立**，不併入 `另一個工具專案`。
 
 ### 2.2 後端抽象（架構決定）
 
@@ -1113,14 +1112,3 @@ ollama pull llama3.2:1b    # 1.3GB，R2 手動 serve 時會用到
 | **S11** | 第三方 repo 中最接近 R8 的回報：「Action should install zstd if it's not present」 | https://github.com/ai-action/setup-ollama/issues/423 |
 
 ---
-
-## 附註：與既有專案的關係
-
-**資料夾維持分開（已定案），不併入 `另一個工具專案`。**
-
-同層資料夾 另一個工具專案 是**不同工具**（檢查 Node.js／PATH／npm／網路／.wslconfig，
-給在 WSL 上跑 AI coding CLI 的開發者用），與本專案的規則不重疊。
-
-但兩者架構完全相同，階段二可直接沿用：純 bash 零相依、PASS/WARN/FAIL 三級、
-每個問題給可複製貼上的修法、只讀不改、`--json` 與 `--lang en` 選項、
-`curl | bash` 一行執行。**建議階段二開始時先讀過 `該工具的腳本` 的輸出層再動手。**
