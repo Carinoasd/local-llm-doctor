@@ -49,6 +49,28 @@ fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------------------------------------------------------------------------
+# 輸出去識別化
+#
+# 這份報告的設計用途是「複製起來貼給任何 AI 助手追問」，所以輸出裡
+# 絕對不能出現使用者的帳號名稱。
+#
+# 具體風險（實測過，不是理論）：R4 會輸出 `type -aP nvidia-smi` 與
+# `ldconfig -p` 的結果。把 nvidia-smi 裝在 conda / pyenv / uv venv /
+# ~/bin 的人，那兩行就會印出 /home/<他的帳號>/...，而且 PASS 分支
+# 照樣輸出。使用者按一次「複製診斷資訊」貼進聊天視窗，帳號名就外送了。
+#
+# 因此所有進入報告的文字都要先過這一層。這是對下游使用者的承諾，
+# 不是可選的美化。
+# ---------------------------------------------------------------------------
+mask_home() {
+    sed -E \
+        -e 's#/home/[^/[:space:]"]+#/home/使用者#g' \
+        -e 's#/mnt/c/Users/[^/[:space:]"]+#/mnt/c/Users/使用者#g' \
+        -e 's#/Users/[^/[:space:]"]+#/Users/使用者#g' \
+        -e 's#/root/#~/#g'
+}
+
 # 規則結果表。索引一致的平行陣列，順序即報告顯示順序。
 RULE_ID=(); RULE_TITLE=(); RULE_STATUS=()
 RULE_SYMPTOM=(); RULE_CONSEQ=(); RULE_FIX=(); RULE_DETAIL=(); RULE_ACTION=()
@@ -61,7 +83,10 @@ RULE_SYMPTOM=(); RULE_CONSEQ=(); RULE_FIX=(); RULE_DETAIL=(); RULE_ACTION=()
 # 這種標題開頭，抓第一行會抓到標題而不是動作。
 add_rule() {
     RULE_ID+=("$1"); RULE_TITLE+=("$2"); RULE_STATUS+=("$3")
-    RULE_SYMPTOM+=("$4"); RULE_CONSEQ+=("$5"); RULE_FIX+=("$6"); RULE_DETAIL+=("$7")
+    RULE_SYMPTOM+=("$4"); RULE_CONSEQ+=("$5"); RULE_FIX+=("$6")
+    # 詳細資料是唯一會塞入系統原始輸出的欄位，統一在這裡過去識別化，
+    # 集中一處比要求每條規則各自記得處理可靠。
+    RULE_DETAIL+=("$(printf '%s' "$7" | mask_home)")
     RULE_ACTION+=("${8:-}")
 }
 
@@ -721,6 +746,7 @@ rule_r5() {                                          # R5 其他程式佔用 VRA
     local detail="nvidia-smi 取樣三次（MiB）：${VRAM_SAMPLES} → 中位數 ${VRAM_USED_MEDIAN}
 GPU Adapter Memory（可信，用於總量）：${ADAPTER_MIB:-未取得} MiB
 估算其他程式佔用：${others_mib} MiB
+⚠ 以下清單含你桌面上的程式名稱，貼給他人前請自行確認。
 GPU Process Memory 排名（僅供排序，數值會膨脹，不可當絕對值）：
 $(printf '%s' "$PROC_RANK" | awk -F'\t' 'NF{printf "  %-24s %8s MB  %s\n", $1, $2, ($3=="no"?"[排除]":"")}')"
 
@@ -994,7 +1020,9 @@ build_copy_text() {
 }
 
 if [ "$NO_HTML" -eq 0 ]; then
-    COPY_TEXT="$(build_copy_text)"
+    # 再過一次去識別化當保險：build_copy_text 除了規則詳細資料之外
+    # 還會印系統資訊，萬一日後有人加了會帶路徑的欄位也能接住。
+    COPY_TEXT="$(build_copy_text | mask_home)"
     {
         cat <<'HTMLHEAD'
 <!doctype html>
@@ -1155,7 +1183,8 @@ HTMLFOOT
     } > "$OUT_HTML"
 
     echo
-    echo "${C_BOLD}報告已產生：${C_RESET}${OUT_HTML}"
+    # 顯示路徑也要遮罩：使用者常直接把終端機輸出整段貼出來。
+    echo "${C_BOLD}報告已產生：${C_RESET}$(printf '%s' "$OUT_HTML" | mask_home)"
     echo "${C_DIM}用瀏覽器打開它，裡面有「複製診斷資訊」按鈕。${C_RESET}"
 fi
 
