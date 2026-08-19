@@ -19,16 +19,21 @@ SPEC_VERSION="rules-draft.md v3.0-verified"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OUT_HTML="${SCRIPT_DIR}/report.html"
 NO_HTML=0
+LIVE_MODE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         -o|--output) OUT_HTML="$2"; shift 2 ;;
         --no-html)   NO_HTML=1; shift ;;
+        --live)      LIVE_MODE=1; shift ;;
         -h|--help)
             cat <<EOF
 用法：check.sh [選項]
   -o, --output <路徑>   report.html 的輸出位置（預設：腳本所在資料夾）
       --no-html         只在終端機顯示，不產生 report.html
+      --live            實際載入一個模型跑一次，讓核心檢查有真實資料可判定
+                        ⚠ 這是唯一會改變系統狀態的選項：它會佔用顯示卡記憶體，
+                          由 Ollama 依 keep-alive 設定自動釋放（預設 5 分鐘）
   -h, --help            顯示這段說明
 EOF
             exit 0 ;;
@@ -353,6 +358,10 @@ probe_vram_consumers() {                             # 規則 R5
         2>/dev/null | tr -d '\r\0')"
     [ -n "$raw" ] || return
 
+    # 同一個程序在每個 GPU adapter 上各有一個 instance（獨顯一個、內顯一個），
+    # 不去重的話同一個程式會在清單裡出現兩次。已按用量降冪排序，取第一筆即可。
+    raw="$(printf '%s\n' "$raw" | awk -F'|' '!seen[$1]++')"
+
     local line pname pmb closable
     while IFS= read -r line; do
         [ -n "${line// /}" ] || continue
@@ -512,13 +521,19 @@ rule_r1_r2() {                                       # R1 溢位 ＋ R2 全 CPU
     [ "$SVC_WSL_UP" -eq 1 ] || return 0
 
     if [ "$MODEL_LOADED" -eq 0 ]; then
+        # 這是外部實測暴露的最大缺口：兩台受測機器都空載，
+        # 導致 R1/R3/R5 一條都沒跑到。所以這裡要主動把使用者導向 --live。
         add_rule "R1" "模型跑在哪裡" "SKIP" \
             "目前沒有模型在執行，所以沒辦法看它跑在顯示卡還是 CPU 上。" \
-            "這不是問題。這個工具最有用的時機，是在你覺得「怎麼這麼慢」的當下——模型還在記憶體裡的時候。" \
-            "先讓模型回答一句話，然後在 5 分鐘內重跑這個檢查：
+            "這不是問題，但也代表這次檢查看不到最關鍵的部分。想看完整診斷，有兩個辦法。" \
+            "最簡單：改成雙擊「run-live.bat」，它會自動載入一個小模型實際跑一次再檢查。
+
+或者你自己讓模型回答一句話，然後在 5 分鐘內重跑這個檢查：
 ollama run llama3.1:8b" \
             "ollama ps 只有表頭，沒有載入中的模型
-（Ollama 預設閒置 5 分鐘後會自動卸載模型）"
+（Ollama 預設閒置 5 分鐘後會自動卸載模型）
+在 WSL 終端機裡的等效指令：./check.sh --live" \
+            "改用 run-live.bat（或 ./check.sh --live）做完整檢查"
         return
     fi
 
@@ -726,7 +741,11 @@ rule_r5() {                                          # R5 其他程式佔用 VRA
     [ "$GPU_PRESENT" -eq 1 ] || return 0
 
     local others_mib=-1
-    if [ "$MODEL_LOADED" -eq 1 ] && [ "$M_SIZE_MIB" -gt 0 ]; then
+    # --live 模式下，載入模型「之前」量到的背景 VRAM 是實測值，
+    # 比從載入後的總量推算扣除模型準確，優先採用。
+    if [ -n "$PRELOAD_OTHERS_MIB" ]; then
+        others_mib="$PRELOAD_OTHERS_MIB"
+    elif [ "$MODEL_LOADED" -eq 1 ] && [ "$M_SIZE_MIB" -gt 0 ]; then
         # 規格 R5：模型在 GPU 上的部分 ≈ SIZE × GPU% + 250 MiB（U12 驗證，殘差 +223~280）
         local model_on_gpu
         model_on_gpu="$(awk -v s="$M_SIZE_MIB" -v p="$M_GPU_PCT" 'BEGIN{printf "%.0f", s*p/100+250}')"
@@ -862,31 +881,279 @@ wsl --update
         "$detail"
 }
 
+
+# ---------------------------------------------------------------------------
+# --live 模式：讓核心規則有真實資料可判定
+#
+# 為什麼需要：R1（溢位）、R3（context）、R5（因果）全部依賴「模型正在
+# 記憶體裡」，而 Ollama 預設閒置 5 分鐘就卸載。使用者通常是「覺得慢 →
+# 去找工具 → 跑起來」，這中間很容易超過 5 分鐘，結果最有價值的三條規則
+# 全部 SKIP。--live 讓工具自己製造出可診斷的狀態。
+#
+# ⚠ 這是整支工具唯一會改變系統狀態的路徑。預設（無參數）行為不受影響。
+# ---------------------------------------------------------------------------
+
+# 速度基準表。鍵是「顯示卡|模型」—— 兩者都必須吻合才有比較意義：
+# 同一張卡上 1B 本來就比 8B 快好幾倍，只用顯示卡當鍵會得出荒謬結論。
+# 數字來源見 MEASUREMENTS.md 的「基準值對照表」，每一筆都是單一機器單次測量。
+declare -A SPEED_BASELINE=(
+    ["NVIDIA GeForce RTX 5070 Ti|llama3.1:8b"]="105.812"
+    ["NVIDIA GeForce RTX 5070 Ti|llama3.2:1b"]="246.802"
+)
+
+LIVE_PROMPT="用三句話解釋什麼是光合作用"
+LIVE_TIMEOUT=60
+
+LIVE_STATUS=""          # ok / no-model / service-down / timeout / too-big / api-error
+LIVE_MODEL=""
+LIVE_TOKS=""            # 第二次（採用值）
+LIVE_TOKS_FIRST=""      # 第一次（暖機，僅供對照）
+LIVE_USED_EXISTING=0    # 1 = 用使用者原本就載入的模型，沒有載入新的
+LIVE_NOTE=""
+PRELOAD_OTHERS_MIB=""   # 載入模型前量到的背景 VRAM，R5 用它算「其他程式佔用」
+
+# 從 ollama list 挑出檔案最小的模型。回傳「名稱 大小MiB」。
+pick_smallest_model() {
+    ollama list 2>/dev/null | awk 'NR>1 && NF>=4 {
+        n=$3; u=$4;
+        if (u=="GB") mib=n*1000000000/1048576;
+        else if (u=="MB") mib=n*1000000/1048576;
+        else if (u=="TB") mib=n*1000000000000/1048576;
+        else next;
+        if (best=="" || mib<bestmib) { best=$1; bestmib=mib }
+    } END { if (best!="") printf "%s %.0f\n", best, bestmib }'
+}
+
+# 這台機器總共有多少記憶體可以裝模型（顯存 + 系統可用記憶體）
+total_capacity_mib() {
+    local ram_kb ram_mib
+    ram_kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
+    ram_mib=$(( ${ram_kb:-0} / 1024 ))
+    echo $(( GPU_VRAM_TOTAL_MIB + ram_mib ))
+}
+
+# 對指定模型跑一次固定 prompt，印出 tok/s。失敗時印空字串並回傳非 0。
+live_one_run() {
+    local model="$1" tmp rc
+    tmp="$(mktemp)"
+    curl -s --max-time "$LIVE_TIMEOUT" http://localhost:11434/api/generate \
+        -d "{\"model\":\"${model}\",\"prompt\":\"${LIVE_PROMPT}\",\"stream\":false}" \
+        -o "$tmp" 2>/dev/null
+    rc=$?
+    if [ "$rc" -ne 0 ]; then rm -f "$tmp"; return "$rc"; fi
+    awk 'BEGIN{RS=","} /"eval_count"/{gsub(/[^0-9]/,"",$0); c=$0} /"eval_duration"/{gsub(/[^0-9]/,"",$0); d=$0}
+         END{ if (c>0 && d>0) printf "%.3f\n", c/(d/1000000000) }' "$tmp"
+    rm -f "$tmp"
+    return 0
+}
+
+do_live_test() {
+    # 前提：服務要在跑
+    if [ "$SVC_WSL_UP" -ne 1 ] || [ -z "$OLLAMA_BIN" ]; then
+        LIVE_STATUS="service-down"; return
+    fi
+
+    # 決定 3：使用者已經有模型載入時，用「他的」模型測，不載入新的。
+    # 去載入另一個模型可能把他正在用的擠掉，或讓兩個同時佔著顯存。
+    if [ "$MODEL_LOADED" -eq 1 ]; then
+        LIVE_MODEL="$M_NAME"; LIVE_USED_EXISTING=1
+    else
+        local pick name mib cap
+        pick="$(pick_smallest_model)"
+        if [ -z "$pick" ]; then LIVE_STATUS="no-model"; return; fi
+        name="${pick%% *}"; mib="${pick##* }"
+        cap="$(total_capacity_mib)"
+        # 風險一：最小的模型也可能一點都不小。裝不下就別載，
+        # 逾時之後才說「載入超時」對使用者沒有幫助，機器還會卡上一分鐘。
+        if [ "$mib" -gt "$cap" ]; then
+            LIVE_STATUS="too-big"; LIVE_MODEL="$name"
+            LIVE_NOTE="模型約 $(awk -v v="$mib" 'BEGIN{printf "%.1f", v/1024}') GB，這台可用的記憶體約 $(awk -v v="$cap" 'BEGIN{printf "%.1f", v/1024}') GB"
+            return
+        fi
+        LIVE_MODEL="$name"
+    fi
+
+    # 決定 4：跑兩次取第二次。基準是這樣量的，只跑一次會系統性地
+    # 把使用者判定成「偏慢」—— 實測第一次因暖機可能慢 37%～100%。
+    local t1 t2 rc
+    t1="$(live_one_run "$LIVE_MODEL")"; rc=$?
+    if [ "$rc" -eq 28 ]; then LIVE_STATUS="timeout"; return; fi
+    if [ "$rc" -ne 0 ]; then LIVE_STATUS="api-error"; return; fi
+    LIVE_TOKS_FIRST="$t1"
+
+    t2="$(live_one_run "$LIVE_MODEL")"; rc=$?
+    if [ "$rc" -eq 28 ]; then LIVE_STATUS="timeout"; return; fi
+    if [ "$rc" -ne 0 ]; then LIVE_STATUS="api-error"; return; fi
+    [ -n "$t2" ] || { LIVE_STATUS="api-error"; return; }
+
+    LIVE_TOKS="$t2"; LIVE_STATUS="ok"
+}
+
+# 速度評價。決定 5：顯示卡與模型都吻合才給評價；決定 6：措辭必須反映
+# 基準只是單次測量，不能講成「正常範圍」。
+live_speed_verdict() {
+    local key base ratio
+    key="${GPU_NAME}|${LIVE_MODEL}"
+    base="${SPEED_BASELINE[$key]:-}"
+    if [ -z "$base" ]; then
+        echo "目前沒有這張顯示卡搭配這個模型的基準值，所以只報數字不做評價——沒有基準就不裝懂。"
+        return
+    fi
+    ratio="$(awk -v a="$LIVE_TOKS" -v b="$base" 'BEGIN{printf "%.2f", a/b}')"
+    local head
+    head="本專案在同一款顯示卡、同一個模型上實測到 ${base} tok/s（單次測量），你的是 $(awk -v v="$LIVE_TOKS" 'BEGIN{printf "%.1f", v}') tok/s。"
+    if   awk -v r="$ratio" 'BEGIN{exit !(r<0.5)}'; then
+        echo "${head}明顯偏慢（約基準的 $(awk -v r="$ratio" 'BEGIN{printf "%d", r*100}')%），往下看有沒有溢位或其他程式佔用顯示卡。"
+    elif awk -v r="$ratio" 'BEGIN{exit !(r<0.7)}'; then
+        echo "${head}比基準慢一些（約 $(awk -v r="$ratio" 'BEGIN{printf "%d", r*100}')%），可以往下看看有沒有可以改善的地方。"
+    elif awk -v r="$ratio" 'BEGIN{exit !(r>1.3)}'; then
+        echo "${head}比基準快，代表你的環境條件比測量當時更好（例如背景程式較少）。"
+    else
+        echo "${head}兩者在同一個量級，看起來正常。"
+    fi
+}
+
+rule_live() {                                        # --live 的結果卡片
+    [ -n "$LIVE_STATUS" ] || return 0
+    case "$LIVE_STATUS" in
+        ok)
+            local until_txt src
+            # 用時間片語比對而不是固定欄位位置：欄位數會因 Ollama 版本
+            # 有無 CONTEXT 欄而不同，寫死位置會抓到隔壁的欄位。
+            until_txt="$(ollama ps 2>/dev/null | sed -n '2p' \
+                         | grep -oE '[0-9]+ (second|minute|hour)s? from now' | head -1)"
+            if [ -n "$until_txt" ]; then
+                until_txt="約 $(printf '%s' "${until_txt% from now}" \
+                    | sed -e 's/ seconds\?$/ 秒/' -e 's/ minutes\?$/ 分鐘/' -e 's/ hours\?$/ 小時/' \
+                    | sed 's/^ *//; s/ *$//')後"
+            else
+                until_txt="幾分鐘後"
+            fi
+            local LIVE_TOKS_R
+            LIVE_TOKS_R="$(awk -v v="$LIVE_TOKS" 'BEGIN{printf "%.1f", v}')"
+            if [ "$LIVE_USED_EXISTING" -eq 1 ]; then
+                src="用的是你原本就載入的模型（${LIVE_MODEL}），沒有另外載入任何東西。"
+            else
+                src="載入了你電腦裡最小的模型（${LIVE_MODEL}）來測。"
+            fi
+            add_rule "LIVE" "實際跑一次的速度" "INFO" \
+                "實際跑了一次，速度是每秒 ${LIVE_TOKS_R} 個 token。" \
+                "（token 是模型輸出的基本單位，數字越大越快。）$(live_speed_verdict) ${src}測試用的模型還在記憶體裡，${until_txt}會自動釋放，不需要你動手。" \
+                "" \
+                "模型：${LIVE_MODEL}
+第 1 次 ${LIVE_TOKS_FIRST:-未取得} tok/s（暖機，不採用）
+第 2 次 ${LIVE_TOKS} tok/s（採用值，與基準相同的量法）
+提示詞：${LIVE_PROMPT}
+顯示卡：${GPU_NAME}
+基準查詢鍵：${GPU_NAME}|${LIVE_MODEL}"
+            ;;
+        no-model)
+            add_rule "LIVE" "實際跑一次的速度" "SKIP" \
+                "你的電腦裡還沒有任何模型，所以沒辦法實際跑一次。" \
+                "沒有模型就沒有東西可以測。這個工具不會自動幫你下載——模型動輒好幾 GB，那應該由你決定。" \
+                "先下載一個小模型（約 1.3 GB），再重跑一次：
+ollama pull llama3.2:1b" \
+                "ollama list 沒有任何項目" \
+                "先執行 ollama pull llama3.2:1b 下載一個小模型"
+            ;;
+        service-down)
+            add_rule "LIVE" "實際跑一次的速度" "SKIP" \
+                "Ollama 服務沒有在跑，所以跳過實測。" \
+                "上面的「Ollama 服務」那一項說明了原因。修好之後再跑一次就會有實測結果。" \
+                "" \
+                "SVC_WSL_UP=${SVC_WSL_UP}"
+            ;;
+        too-big)
+            add_rule "LIVE" "實際跑一次的速度" "SKIP" \
+                "你電腦裡最小的模型（${LIVE_MODEL}）對這台機器來說還是太大，所以沒有實際去跑。" \
+                "硬跑下去會讓機器卡住好一段時間，而且結果只會告訴你「跑不動」——那個你已經知道了。${LIVE_NOTE}。" \
+                "下載一個小一點的模型再試：
+ollama pull llama3.2:1b" \
+                "${LIVE_NOTE}
+判定：模型大小 > 顯示卡記憶體 + 系統可用記憶體" \
+                "下載一個小一點的模型（ollama pull llama3.2:1b）"
+            ;;
+        timeout)
+            add_rule "LIVE" "實際跑一次的速度" "WARN" \
+                "模型載入超過 ${LIVE_TIMEOUT} 秒還沒有回應，所以停止等待。" \
+                "這本身就是有用的診斷結果：通常代表模型太大、需要從硬碟大量搬資料，或是被擠到 CPU 上跑。往下看「模型放不進顯示卡」那一項會更清楚。⚠ 注意：我們只是不再等待，Ollama 那邊可能還在繼續載入，所以顯示卡記憶體可能會再被佔用一段時間。" \
+                "如果這台電腦跑不動這個模型，換一個小一點的：
+ollama pull llama3.2:1b" \
+                "模型：${LIVE_MODEL}
+逾時設定：${LIVE_TIMEOUT} 秒（curl exit 28）" \
+                "換一個小一點的模型試試"
+            ;;
+        api-error)
+            add_rule "LIVE" "實際跑一次的速度" "WARN" \
+                "實測的過程中發生錯誤，沒有拿到速度數字。" \
+                "服務有回應，但這次請求沒有正常完成。標準檢查的結果不受影響，仍然可以參考。" \
+                "" \
+                "模型：${LIVE_MODEL:-未選定}
+狀態：API 呼叫未回傳可解析的結果"
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # 執行
 # ---------------------------------------------------------------------------
 
 echo "${C_BOLD}本地 LLM 環境健檢${C_RESET} ${C_DIM}v${VERSION} · 規格 ${SPEC_VERSION}${C_RESET}"
-echo "${C_DIM}只讀取不修改任何設定，正在檢查…${C_RESET}"
+if [ "$LIVE_MODE" -eq 1 ]; then
+    echo "${C_DIM}完整檢查模式：稍後會實際載入一個模型跑一次，其餘檢查只讀取不修改…${C_RESET}"
+else
+    echo "${C_DIM}只讀取不修改任何設定，正在檢查…${C_RESET}"
+fi
 echo
 
-probe_gpu
-[ -n "$(command -v ollama 2>/dev/null)" ] && backend_use_ollama
-probe_service
-probe_loaded_model
-probe_model_file_size
-probe_fit_log
-probe_vram_median
-probe_vram_consumers
+# 包成函式，是為了 --live 能在載入模型之後乾淨地重跑一次。
+# 全部都是唯讀檢查，跑兩次沒有副作用。
+run_all_probes() {
+    probe_gpu
+    [ -n "$(command -v ollama 2>/dev/null)" ] && backend_use_ollama
+    probe_service
+    probe_loaded_model
+    probe_model_file_size
+    probe_fit_log
+    probe_vram_median
+    probe_vram_consumers
+}
 
-rule_r0
-rule_r8
-rule_r6
-rule_r1_r2
-rule_r3
-rule_r9
-rule_r5
-rule_r4
+run_all_rules() {
+    rule_r0
+    rule_live          # LIVE_STATUS 為空時（＝標準模式）自動略過
+    rule_r8
+    rule_r6
+    rule_r1_r2
+    rule_r3
+    rule_r9
+    rule_r5
+    rule_r4
+}
+
+reset_rules() {
+    RULE_ID=(); RULE_TITLE=(); RULE_STATUS=()
+    RULE_SYMPTOM=(); RULE_CONSEQ=(); RULE_FIX=(); RULE_DETAIL=(); RULE_ACTION=()
+}
+
+run_all_probes
+run_all_rules
+
+if [ "$LIVE_MODE" -eq 1 ]; then
+    # 載入模型之前量到的背景 VRAM 是「其他程式佔用」的實測值。
+    # 載入之後只能靠推算扣除模型，準確度較差，所以先存起來給 R5 用。
+    PRELOAD_OTHERS_MIB="$VRAM_USED_MEDIAN"
+
+    echo "${C_DIM}正在實際載入模型測試（這會佔用顯示卡記憶體，稍後由 Ollama 自動釋放）…${C_RESET}"
+    do_live_test
+
+    # 不論成功與否都重跑一次：規則的判定條件可能已經改變
+    # （例如原本沒有模型載入、現在有了），而且要讓 rule_live 的卡片進入報告。
+    reset_rules
+    run_all_probes
+    run_all_rules
+    echo
+fi
 
 # ---------------------------------------------------------------------------
 # 結論層：報告最上面的 2–3 行人話總結
