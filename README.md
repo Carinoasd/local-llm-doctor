@@ -86,9 +86,15 @@ git clone https://github.com/Carinoasd/local-llm-doctor.git
 > 所以差 2.8 GB 塞不下。這就是上面「模型放不進顯示卡」的原因。
 > 目前佔用最多、而且可以關掉的是「NVIDIA App 的遊戲overlay」——關掉它很可能就解決了。
 
-<!-- TODO: screenshot —— report.html 的結論區 -->
+<!-- 截圖範圍：瀏覽器打開 report.html 後，從頁面最上方的標題開始，
+     往下截到「綠色（或黃/紅色）結論框」的下緣為止 —— 不含下方的
+     「複製診斷資訊」按鈕與任何規則卡片。詳細裁切說明見專案內部討論。 -->
+![報告結論區範例](docs/screenshot-report.png)
 
-<!-- TODO: screenshot —— 終端機輸出 -->
+<!-- 截圖範圍：終端機執行 ./check.sh（或 --live）的畫面，從第一行
+     「本地 LLM 環境健檢 v...」開始，往下截到 ═══ 結論框的下緣，
+     建議延伸到再往下 2–3 張規則卡片以顯示顏色標籤。詳細裁切說明見專案內部討論。 -->
+![終端機輸出範例](docs/screenshot-terminal.png)
 
 ### 檢查哪些項目
 
