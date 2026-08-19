@@ -746,18 +746,27 @@ rule_r5() {                                          # R5 其他程式佔用 VRA
     [ "$GPU_PRESENT" -eq 1 ] || return 0
 
     local others_mib=-1
+    # others_source 記錄這個數字是「哪個時間點」量到的 —— R5 的詳細資料
+    # 同時會顯示「目前」的 nvidia-smi 中位數（VRAM_USED_MEDIAN，可能是
+    # --live 模式下模型載入「後」的值），兩者若不標明時點，會讓使用者
+    # 誤以為算術兜不起來（實測踩過：載入前 2705 vs 載入後總量 4302，
+    # 差額才是模型本身，不是算錯）。
+    local others_source=""
     # --live 模式下，載入模型「之前」量到的背景 VRAM 是實測值，
     # 比從載入後的總量推算扣除模型準確，優先採用。
     if [ -n "$PRELOAD_OTHERS_MIB" ]; then
         others_mib="$PRELOAD_OTHERS_MIB"
+        others_source="模型載入前的實測值"
     elif [ "$MODEL_LOADED" -eq 1 ] && [ "$M_SIZE_MIB" -gt 0 ]; then
         # 規格 R5：模型在 GPU 上的部分 ≈ SIZE × GPU% + 250 MiB（U12 驗證，殘差 +223~280）
         local model_on_gpu
         model_on_gpu="$(awk -v s="$M_SIZE_MIB" -v p="$M_GPU_PCT" 'BEGIN{printf "%.0f", s*p/100+250}')"
         others_mib=$(( VRAM_USED_MEDIAN - model_on_gpu ))
         [ "$others_mib" -lt 0 ] && others_mib=0
+        others_source="從目前總量推算，已扣除模型本身估計佔用的 ${model_on_gpu} MiB"
     else
         others_mib="$VRAM_USED_MEDIAN"
+        others_source="目前沒有模型載入，等於顯示卡目前的總用量"
     fi
 
     # 排除清單（vmwp / dwm / 系統元件）不進入「可以關掉」的建議名單，
@@ -779,9 +788,11 @@ rule_r5() {                                          # R5 其他程式佔用 VRA
         top_line="$(printf '%s' "$closable_list" | head -3 | paste -sd'、' -)"
     fi
 
-    local detail="nvidia-smi 取樣三次（MiB）：${VRAM_SAMPLES} → 中位數 ${VRAM_USED_MEDIAN}
+    local vram_now_label="目前"
+    [ -n "$PRELOAD_OTHERS_MIB" ] && vram_now_label="目前（模型已載入）"
+    local detail="nvidia-smi 取樣三次，${vram_now_label}（MiB）：${VRAM_SAMPLES} → 中位數 ${VRAM_USED_MEDIAN}
 GPU Adapter Memory（可信，用於總量）：${ADAPTER_MIB:-未取得} MiB
-估算其他程式佔用：${others_mib} MiB
+估算其他程式佔用：${others_mib} MiB（${others_source}）
 ⚠ 以下清單含你桌面上的程式名稱，貼給他人前請自行確認。
 GPU Process Memory 排名（僅供排序，數值會膨脹，不可當絕對值）：
 $(printf '%s' "$PROC_RANK" | awk -F'\t' 'NF{printf "  %-24s %8s MB  %s\n", $1, $2, ($3=="no"?"[排除]":"")}')"
