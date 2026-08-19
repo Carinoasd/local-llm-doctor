@@ -349,6 +349,11 @@ ADAPTER_MIB=""
 PROC_RANK=""            # 每行：<程序名>\t<MB>\t<可否建議關閉>
 probe_vram_consumers() {                             # 規則 R5
     have powershell.exe || return
+    # PROC_RANK 用 += 累加，--live 模式會呼叫這個函式兩次
+    # （載入模型前一次、模型就位後一次）。不在這裡清空的話，
+    # 第二次的結果會疊在第一次上面，整份清單重複一遍 —— 這是實測抓到的真 bug，
+    # 教訓見檔尾。
+    PROC_RANK=""
     ADAPTER_MIB="$(powershell.exe -NoProfile -Command \
         "(Get-Counter '\\GPU Adapter Memory(*)\\Dedicated Usage' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CounterSamples | Sort-Object CookedValue -Descending | Select-Object -First 1).CookedValue" \
         2>/dev/null | tr -d '\r\0' | awk 'NF{printf "%.0f", $1/1048576; exit}')"
@@ -891,6 +896,18 @@ wsl --update
 # 全部 SKIP。--live 讓工具自己製造出可診斷的狀態。
 #
 # ⚠ 這是整支工具唯一會改變系統狀態的路徑。預設（無參數）行為不受影響。
+#
+# ⚠ 實作陷阱：這個模式會把 run_all_probes() 呼叫兩次（載入模型前一次、
+# 模型就位後一次）。任何 probe 函式裡用 += 累加而非直接指定的全域變數，
+# 第二次呼叫都會把結果疊在第一次上面 —— PROC_RANK 就這樣重複過一次
+# （見 probe_vram_consumers 開頭的清空）。新增 probe 狀態變數時要記得：
+# 這支腳本裡「只跑一次」不是可以預設的前提。
+#
+# ⚠ 測試方法的教訓：這個 bug 當初用合成輸入驗證去重邏輯時是通過的
+# （造了一份含重複 dwm 的假資料餵給 awk 去重，結果正確）。但那只測到
+# 「單次呼叫裡的重複」，沒測到「--live 讓函式被呼叫兩次」這個真正的根因。
+# 合成輸入能驗證邏輯本身對不對，驗證不了「這段邏輯會被呼叫幾次、
+# 呼叫之間狀態有沒有被正確重置」——這種只有跑真實流程才會暴露。
 # ---------------------------------------------------------------------------
 
 # 速度基準表。鍵是「顯示卡|模型」—— 兩者都必須吻合才有比較意義：
