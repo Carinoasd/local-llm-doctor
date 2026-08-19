@@ -1102,6 +1102,7 @@ msg="inference compute" id=0 library=CUDA compute=12.0 name=CUDA0
 | **U15** | R1 分級門檻（1–15% / 16–50% / >50%）是否合理 | 只有 29% 與 82% 兩個實測點，中間與兩端是內插外推 |
 | **U16** | R9 的 log 字串跨版本穩定性 | 字串來自 llama.cpp 上游，可能隨版本改變 |
 | **U17** | `#27` 開關瀏覽器的 VRAM 變化 | 驗證當天有背景影片解碼負載無法執行，日後補做 |
+| **U18** | `--live` 的固定 prompt 沒有固定取樣參數，預設 temperature 下每次生成 token 數不同（同一句 prompt 量到 30 或 36 個），小樣本下放大變異 | 2026-08-19 排查速度基準異常時發現。未來可考慮固定 seed 或 `temperature=0` 讓測量可重現——先記著不實作，等有更多機器的數據再決定值不值得 |
 
 > 逐步驗證清單見同資料夾的 `verify-checklist.md`，完整原始輸出見 `verify-report.md`。
 
