@@ -1020,24 +1020,31 @@ do_live_test() {
 # 速度評價。決定 5：顯示卡與模型都吻合才給評價；決定 6：措辭必須反映
 # 基準只是單次測量，不能講成「正常範圍」。
 live_speed_verdict() {
-    local key base ratio
+    local key base ratio toks_r
     key="${GPU_NAME}|${LIVE_MODEL}"
     base="${SPEED_BASELINE[$key]:-}"
     if [ -z "$base" ]; then
         echo "目前沒有這張顯示卡搭配這個模型的基準值，所以只報數字不做評價——沒有基準就不裝懂。"
         return
     fi
+    toks_r="$(awk -v v="$LIVE_TOKS" 'BEGIN{printf "%.1f", v}')"
     ratio="$(awk -v a="$LIVE_TOKS" -v b="$base" 'BEGIN{printf "%.2f", a/b}')"
-    local head
-    head="本專案在同一款顯示卡、同一個模型上實測到 ${base} tok/s（單次測量），你的是 $(awk -v v="$LIVE_TOKS" 'BEGIN{printf "%.1f", v}') tok/s。"
-    if   awk -v r="$ratio" 'BEGIN{exit !(r<0.5)}'; then
-        echo "${head}明顯偏慢（約基準的 $(awk -v r="$ratio" 'BEGIN{printf "%d", r*100}')%），往下看有沒有溢位或其他程式佔用顯示卡。"
-    elif awk -v r="$ratio" 'BEGIN{exit !(r<0.7)}'; then
-        echo "${head}比基準慢一些（約 $(awk -v r="$ratio" 'BEGIN{printf "%d", r*100}')%），可以往下看看有沒有可以改善的地方。"
-    elif awk -v r="$ratio" 'BEGIN{exit !(r>1.3)}'; then
-        echo "${head}比基準快，代表你的環境條件比測量當時更好（例如背景程式較少）。"
+
+    # 不對稱設計：只有「明顯偏慢」給出可行動的判斷，因為那個方向有明確
+    # 可能原因（溢位、跑在 CPU 上）可以往下查。基準以上／附近的所有情況
+    # 一律不評價原因、不猜「為什麼」——
+    #
+    # 實測證實：同一台機器、同一個模型、同一個 Ollama 服務會話內（沒有
+    # 重開機、沒有版本或驅動變化），三次獨立卸載重載循環量到 340-348
+    # tok/s，而基準本身是 246.8 tok/s，原因不明（背景 VRAM 那次反而更高，
+    # 方向相反，已排除；詳見 MEASUREMENTS.md）。這代表單次測量本身就有
+    # 約 ±40% 的變異，「比基準快 = 環境條件比較好」這種說法是在替雜訊
+    # 編一個聽起來合理的故事——跟 vmwp、R4 誤判是同一類錯誤：
+    # 用自信的語氣解釋一個其實不知道原因的現象。
+    if awk -v r="$ratio" 'BEGIN{exit !(r<0.5)}'; then
+        echo "你的速度是 ${toks_r} tok/s，本專案在同款顯示卡、同個模型上實測到 ${base} tok/s（單次測量）。明顯偏慢（約基準的 $(awk -v r="$ratio" 'BEGIN{printf "%d", r*100}')%），往下看有沒有溢位或其他程式佔用顯示卡。"
     else
-        echo "${head}兩者在同一個量級，看起來正常。"
+        echo "你的速度是 ${toks_r} tok/s，本專案在同款顯示卡、同個模型上實測到 ${base} tok/s（單次測量）。單次測量的變異可能很大，只有明顯偏慢才值得往下查。"
     fi
 }
 
