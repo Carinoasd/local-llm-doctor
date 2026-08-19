@@ -789,7 +789,7 @@ rule_r5() {                                          # R5 其他程式佔用 VRA
     fi
 
     local vram_now_label="目前"
-    [ -n "$PRELOAD_OTHERS_MIB" ] && vram_now_label="目前（模型已載入）"
+    [ "$MODEL_LOADED" -eq 1 ] && vram_now_label="目前（模型已載入）"
     local detail="nvidia-smi 取樣三次，${vram_now_label}（MiB）：${VRAM_SAMPLES} → 中位數 ${VRAM_USED_MEDIAN}
 GPU Adapter Memory（可信，用於總量）：${ADAPTER_MIB:-未取得} MiB
 估算其他程式佔用：${others_mib} MiB（${others_source}）
@@ -1171,9 +1171,22 @@ run_all_probes
 run_all_rules
 
 if [ "$LIVE_MODE" -eq 1 ]; then
-    # 載入模型之前量到的背景 VRAM 是「其他程式佔用」的實測值。
-    # 載入之後只能靠推算扣除模型，準確度較差，所以先存起來給 R5 用。
-    PRELOAD_OTHERS_MIB="$VRAM_USED_MEDIAN"
+    # 只有在模型「原本沒有載入」時，這次量到的 VRAM_USED_MEDIAN 才是
+    # 乾淨的背景基線，可以直接當成「其他程式佔用」的實測值。
+    #
+    # 這裡曾經漏掉這個判斷，無條件把它存起來 —— 結果決定 3 的路徑
+    # （使用者本來就有模型在跑，do_live_test 直接用他的模型測，不載入
+    # 新的）會被撞出真 bug：這次量到的 VRAM 早就含著使用者自己的模型，
+    # 卻被標成「其他程式佔用」，讓 R5 的因果句告訴使用者「其他程式
+    # 佔了 X GB」，其中有一部分其實是他自己的模型。是 vmwp 那個坑的
+    # 變體：把使用者自己的東西算成別人佔的。
+    #
+    # 模型本來就已經載入的情況，不設這個值，交給 rule_r5 的 elif 分支
+    # 處理 —— 它會用「載入後總量－模型估計佔用」的公式，同樣能正確
+    # 排除模型本身，而且這正是那條公式原本就該用在的場景。
+    if [ "$MODEL_LOADED" -eq 0 ]; then
+        PRELOAD_OTHERS_MIB="$VRAM_USED_MEDIAN"
+    fi
 
     echo "${C_DIM}正在實際載入模型測試（這會佔用顯示卡記憶體，稍後由 Ollama 自動釋放）…${C_RESET}"
     do_live_test
