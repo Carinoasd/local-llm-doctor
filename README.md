@@ -1,5 +1,22 @@
 # local-llm-doctor
 
+## What this does
+
+Diagnoses why your local LLM (via Ollama, on Windows + WSL2 + an NVIDIA GPU)
+is running slowly with no error message telling you why — usually because
+the model doesn't fully fit in VRAM, context is set too large, or another
+program is holding onto GPU memory. Built for people who can run Ollama but
+don't know what VRAM, GPU offload, or context length mean.
+
+Double-click `run.bat` and you get a plain-language report in about ten
+seconds, with a copy-pasteable fix for each problem found. All the speed
+numbers in this repo are measured on real hardware, not estimated — see
+[MEASUREMENTS.md](MEASUREMENTS.md).
+
+*(Full documentation in Traditional Chinese below.)*
+
+---
+
 **你的本地 LLM 跑得很慢，但沒有任何錯誤訊息——這支工具告訴你為什麼。**
 
 給裝了 Ollama、能跑起來、但不懂底層在幹嘛的人。你不需要知道 VRAM 和 RAM 差在哪，
