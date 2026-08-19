@@ -1149,7 +1149,6 @@ run_all_probes() {
 
 run_all_rules() {
     rule_r0
-    rule_live          # LIVE_STATUS 為空時（＝標準模式）自動略過
     rule_r8
     rule_r6
     rule_r1_r2
@@ -1157,6 +1156,10 @@ run_all_rules() {
     rule_r9
     rule_r5
     rule_r4
+    # LIVE 放在規則序列最後：它是一次「實測結果」，不是判斷規則，
+    # 不該夾在 R0/R6 中間打斷規則的閱讀順序。
+    # LIVE_STATUS 為空時（＝標準模式）rule_live 自動略過，不影響版面。
+    rule_live
 }
 
 reset_rules() {
